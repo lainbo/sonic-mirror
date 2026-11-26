@@ -15,5 +15,7 @@
 pnpm install
 pnpm dev       # 本地开发
 pnpm build     # 类型检查并构建生产包
-pnpm deploy    # 构建并部署到 Cloudflare Workers (Static Assets)
+pnpm run deploy  # 构建并手动部署到 Cloudflare Workers (Static Assets)
 ```
+
+推送到 `main` 分支后，Cloudflare Workers Builds 会自动构建并部署。
