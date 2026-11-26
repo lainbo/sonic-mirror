@@ -13,8 +13,9 @@ interface PhraseSegment {
 
 /**
  * Generates a realistic 10-second vocal phrase (C4 -> E4 -> G4 -> A4 -> G4 -> C5 -> B4 -> A4 -> G4)
- * with subtle human portamento, vibrato, and intonation variation so users can
- * immediately inspect the pitch curve and hover readout before turning on a mic.
+ * with subtle human portamento, vibrato, and intonation variation (including two notes held
+ * between keys) so users can immediately inspect the pitch curve, 琴缝音 marks and hover
+ * readout before turning on a mic.
  */
 export function generateDemoVocalPhrase(a4Hz = 440): PitchSample[] {
   const segments: PhraseSegment[] = [
@@ -26,9 +27,9 @@ export function generateDemoVocalPhrase(a4Hz = 440): PitchSample[] {
     { start: 4.95, end: 5.75, midi: 67, glideFrom: 69, glideDuration: 0.15, driftCents: -3, vibratoDepth: 0.09, vibratoRate: 5.3 }, // G4
     { start: 5.75, end: 7.25, midi: 72, glideFrom: 67, glideDuration: 0.24, driftCents: 2, vibratoDepth: 0.16, vibratoRate: 5.8 }, // C5 (sustained high note)
     // Short breath
-    { start: 7.65, end: 8.35, midi: 71, driftCents: -15, vibratoDepth: 0.09, vibratoRate: 5.1 }, // B4 (slightly flat)
-    { start: 8.35, end: 9.05, midi: 69, glideFrom: 71, glideDuration: 0.14, driftCents: 3, vibratoDepth: 0.1, vibratoRate: 5.4 }, // A4
-    { start: 9.05, end: 10.2, midi: 67, glideFrom: 69, glideDuration: 0.18, driftCents: -2, vibratoDepth: 0.14, vibratoRate: 5.5 }, // G4
+    { start: 7.65, end: 8.35, midi: 71, driftCents: -42, vibratoDepth: 0.09, vibratoRate: 5.1 }, // B4 (held between A♯4 and B4)
+    { start: 8.35, end: 9.05, midi: 69, glideFrom: 70.58, glideDuration: 0.14, driftCents: 3, vibratoDepth: 0.1, vibratoRate: 5.4 }, // A4 (glides down from the flat B4)
+    { start: 9.05, end: 10.2, midi: 67, glideFrom: 69, glideDuration: 0.18, driftCents: 40, vibratoDepth: 0.14, vibratoRate: 5.5 }, // G4 (held between G4 and G♯4)
   ]
 
   const samples: PitchSample[] = []

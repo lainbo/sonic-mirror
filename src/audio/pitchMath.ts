@@ -20,6 +20,21 @@ export interface PitchSample {
   rms: number
 }
 
+// Voiced samples further apart than this belong to separate phrases
+export const PHRASE_GAP_SECONDS = 0.18
+
+/** Index of the first sample at or after `time` (samples are sorted by time). */
+export function firstSampleIndexAt(samples: PitchSample[], time: number): number {
+  let lo = 0
+  let hi = samples.length
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1
+    if (samples[mid]!.time < time) lo = mid + 1
+    else hi = mid
+  }
+  return lo
+}
+
 const NOTE_NAMES_SHARP = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'] as const
 const NOTE_NAMES_DISPLAY = ['C', 'C♯', 'D', 'D♯', 'E', 'F', 'F♯', 'G', 'G♯', 'A', 'A♯', 'B'] as const
 const SOLFEGE_NAMES = ['Do', 'Di', 'Re', 'Ri', 'Mi', 'Fa', 'Fi', 'Sol', 'Si', 'La', 'Li', 'Ti'] as const

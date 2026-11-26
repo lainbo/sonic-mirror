@@ -2,14 +2,17 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import {
   describePitchFromMidi,
+  firstSampleIndexAt,
   formatCents,
   formatTimestamp,
   isBlackKey,
   midiToFrequency,
   midiToNoteParts,
+  PHRASE_GAP_SECONDS,
   type PitchInfo,
   type PitchSample,
 } from '../audio/pitchMath'
+import { findBetweenKeyNotes } from '../audio/betweenKeyNotes'
 
 export interface HoverInspection {
   pitch: PitchInfo
@@ -121,7 +124,25 @@ function yToMidi(y: number, minMidi: number, maxMidi: number): number {
   return minMidi + ratio * (maxMidi - minMidi)
 }
 
-const TRACE_COLOR = '#4FD1A5'
+const TRACE = { line: '#4FD1A5', glow: 'rgba(79, 209, 165, 0.18)', halo: 'rgba(79, 209, 165, 0.24)' }
+const OFF_KEY = { line: '#EE7863', glow: 'rgba(238, 120, 99, 0.2)', halo: 'rgba(238, 120, 99, 0.26)' }
+
+function formatOffKey(cents: number): string {
+  return `${cents > 0 ? '偏高' : '偏低'} ${Math.abs(cents)}¢`
+}
+
+// 琴缝音 overlapping the visible time window
+const betweenKeyNotes = computed(() => {
+  void props.sampleVersion
+  const { startTime, endTime } = getTimeBounds()
+  return findBetweenKeyNotes(props.samples, startTime, endTime)
+})
+
+const hoveredBetweenKeyNote = computed(() => {
+  const h = hoveredInspection.value
+  if (!h) return null
+  return betweenKeyNotes.value.find((n) => h.time >= n.startTime && h.time <= n.endTime) ?? null
+})
 
 function clampCenterMidi(val: number): number {
   const half = VISIBLE_SEMITONES / 2
@@ -213,15 +234,7 @@ function updateHoverFromPointer(x: number, y: number) {
   const plotW = Math.max(1, canvasWidth - AXIS_WIDTH - RIGHT_PAD)
   const snapSeconds = (24 / plotW) * (endTime - startTime)
 
-  // Binary search starting index near cursorTime - snapSeconds
-  let lo = 0
-  let hi = list.length - 1
-  const searchMin = cursorTime - snapSeconds
-  while (lo < hi) {
-    const mid = (lo + hi) >> 1
-    if (list[mid]!.time < searchMin) lo = mid + 1
-    else hi = mid
-  }
+  const lo = firstSampleIndexAt(list, cursorTime - snapSeconds)
 
   let bestSample: PitchSample | null = null
   let bestScore = Infinity
@@ -514,15 +527,7 @@ function renderCanvas() {
   // 5. Pitch trajectory curve
   const list = props.samples
   if (list.length > 0) {
-    // Binary search first visible sample
-    let startIdx = 0
-    let hi = list.length - 1
-    const visStart = startTime - 0.3
-    while (startIdx < hi) {
-      const mid = (startIdx + hi) >> 1
-      if (list[mid]!.time < visStart) startIdx = mid + 1
-      else hi = mid
-    }
+    const startIdx = firstSampleIndexAt(list, startTime - 0.3)
 
     // Group into continuous voiced phrases
     type Pt = { x: number; y: number; midi: number; time: number }
@@ -546,7 +551,7 @@ function renderCanvas() {
       const broken =
         prevSample !== null &&
         prevSample.midi !== null &&
-        (s.time - prevSample.time > 0.18 || Math.abs(s.midi - prevSample.midi) > 9)
+        (s.time - prevSample.time > PHRASE_GAP_SECONDS || Math.abs(s.midi - prevSample.midi) > 9)
 
       if (broken && currentPhrase.length > 0) {
         phrases.push(currentPhrase)
@@ -563,52 +568,131 @@ function renderCanvas() {
       phrases.push(currentPhrase)
     }
 
-    // Draw soft glow halo + crisp unified pitch trace for each phrase
-    ctx.lineCap = 'round'
-    ctx.lineJoin = 'round'
-
+    // Build each phrase as a smooth quadratic spline once; single samples become dots
+    const tracePaths: Path2D[] = []
     for (const phrase of phrases) {
       if (phrase.length === 1) {
         const p = phrase[0]!
-        ctx.fillStyle = TRACE_COLOR
+        ctx.fillStyle = TRACE.line
         ctx.beginPath()
         ctx.arc(p.x, p.y, 2.5, 0, Math.PI * 2)
         ctx.fill()
         continue
       }
 
-      // Build smooth quadratic spline path once, stroke glow then foreground line
-      ctx.beginPath()
-      ctx.moveTo(phrase[0]!.x, phrase[0]!.y)
+      const path = new Path2D()
+      path.moveTo(phrase[0]!.x, phrase[0]!.y)
       for (let i = 1; i < phrase.length; i++) {
         const prev = phrase[i - 1]!
         const curr = phrase[i]!
-        const mx = (prev.x + curr.x) / 2
-        const my = (prev.y + curr.y) / 2
-        ctx.quadraticCurveTo(prev.x, prev.y, mx, my)
+        path.quadraticCurveTo(prev.x, prev.y, (prev.x + curr.x) / 2, (prev.y + curr.y) / 2)
       }
       const last = phrase[phrase.length - 1]!
-      ctx.lineTo(last.x, last.y)
-
-      ctx.strokeStyle = 'rgba(79, 209, 165, 0.18)'
-      ctx.lineWidth = 8
-      ctx.stroke()
-
-      ctx.strokeStyle = TRACE_COLOR
-      ctx.lineWidth = 2.6
-      ctx.stroke()
+      path.lineTo(last.x, last.y)
+      tracePaths.push(path)
     }
 
-    // Live playhead beacon on the latest voiced point
+    const strokeTrace = (palette: typeof TRACE) => {
+      for (const path of tracePaths) {
+        ctx.strokeStyle = palette.glow
+        ctx.lineWidth = 8
+        ctx.stroke(path)
+        ctx.strokeStyle = palette.line
+        ctx.lineWidth = 2.6
+        ctx.stroke(path)
+      }
+    }
+
+    // 琴缝音: shade the gap between the nearest key and the sung pitch, dash the key line
+    const offKeyNotes = betweenKeyNotes.value
+    const offKeySpans = new Path2D()
+    for (const note of offKeyNotes) {
+      const x0 = timeToX(note.startTime, startTime, endTime)
+      const x1 = timeToX(note.endTime, startTime, endTime)
+      const keyY = midiToY(note.nearestMidi, minMidi, maxMidi)
+      const sungY = midiToY(note.centerMidi, minMidi, maxMidi)
+      offKeySpans.rect(x0, TOP_PAD, x1 - x0, plotH)
+
+      ctx.fillStyle = 'rgba(238, 120, 99, 0.16)'
+      ctx.fillRect(x0, Math.min(keyY, sungY), x1 - x0, Math.abs(sungY - keyY))
+
+      ctx.save()
+      ctx.setLineDash([3, 3])
+      ctx.strokeStyle = 'rgba(238, 120, 99, 0.75)'
+      ctx.lineWidth = 1
+      ctx.beginPath()
+      ctx.moveTo(x0, keyY)
+      ctx.lineTo(x1, keyY)
+      ctx.stroke()
+      ctx.restore()
+    }
+
+    ctx.lineCap = 'round'
+    ctx.lineJoin = 'round'
+
+    // Regular trace everywhere except 琴缝音 spans, which are stroked in the warning color
+    const outsideOffKey = new Path2D()
+    outsideOffKey.rect(AXIS_WIDTH, TOP_PAD, plotW, plotH)
+    outsideOffKey.addPath(offKeySpans)
+    ctx.save()
+    ctx.clip(outsideOffKey, 'evenodd')
+    strokeTrace(TRACE)
+    ctx.restore()
+
+    if (offKeyNotes.length > 0) {
+      ctx.save()
+      ctx.clip(offKeySpans)
+      strokeTrace(OFF_KEY)
+      ctx.restore()
+
+      // Offset badge on the far side of the curve from the key line, skipped when crowded
+      ctx.font = '600 10.5px "Plus Jakarta Sans", -apple-system, sans-serif'
+      ctx.textAlign = 'center'
+      ctx.textBaseline = 'middle'
+      const badgeH = 18
+      const clearance = semitonePx * 0.6 + 4
+      let lastBadgeRight = -Infinity
+      for (const note of offKeyNotes) {
+        const x0 = timeToX(note.startTime, startTime, endTime)
+        const x1 = timeToX(note.endTime, startTime, endTime)
+        const sungY = midiToY(note.centerMidi, minMidi, maxMidi)
+        if (x1 < AXIS_WIDTH || x0 > AXIS_WIDTH + plotW || sungY < TOP_PAD || sungY > TOP_PAD + plotH) {
+          continue
+        }
+
+        const label = formatOffKey(note.cents)
+        const badgeW = ctx.measureText(label).width + 12
+        const bx = Math.max(
+          AXIS_WIDTH + 2,
+          Math.min(AXIS_WIDTH + plotW - badgeW - 2, (x0 + x1) / 2 - badgeW / 2),
+        )
+        if (bx < lastBadgeRight + 4) continue
+        const by = note.cents > 0 ? sungY - clearance - badgeH : sungY + clearance
+
+        ctx.fillStyle = 'rgba(23, 31, 40, 0.92)'
+        ctx.strokeStyle = OFF_KEY.line
+        ctx.lineWidth = 1
+        ctx.beginPath()
+        ctx.roundRect(bx, by, badgeW, badgeH, 5)
+        ctx.fill()
+        ctx.stroke()
+        ctx.fillStyle = OFF_KEY.line
+        ctx.fillText(label, bx + badgeW / 2, by + badgeH / 2 + 0.5)
+        lastBadgeRight = bx + badgeW
+      }
+    }
+
+    // Live playhead beacon on the latest voiced point, in the warning color while held off-key
     if (props.isListening && timeOffset.value < 0.1) {
       const tail = list[list.length - 1]
       if (tail && tail.midi !== null) {
         const lx = timeToX(tail.time, startTime, endTime)
         const ly = midiToY(tail.midi, minMidi, maxMidi)
+        const palette = offKeyNotes.at(-1)?.endTime === tail.time ? OFF_KEY : TRACE
 
         ctx.beginPath()
         ctx.arc(lx, ly, 9, 0, Math.PI * 2)
-        ctx.fillStyle = 'rgba(79, 209, 165, 0.22)'
+        ctx.fillStyle = palette.halo
         ctx.fill()
 
         ctx.beginPath()
@@ -616,7 +700,7 @@ function renderCanvas() {
         ctx.fillStyle = '#F2EDE4'
         ctx.fill()
         ctx.lineWidth = 2
-        ctx.strokeStyle = TRACE_COLOR
+        ctx.strokeStyle = palette.line
         ctx.stroke()
       }
     }
@@ -648,9 +732,10 @@ function renderCanvas() {
     ctx.restore()
 
     // Highlighted point ring
+    const palette = hoveredBetweenKeyNote.value ? OFF_KEY : TRACE
     ctx.beginPath()
     ctx.arc(hx, hy, 10, 0, Math.PI * 2)
-    ctx.fillStyle = 'rgba(79, 209, 165, 0.24)'
+    ctx.fillStyle = palette.halo
     ctx.fill()
 
     ctx.beginPath()
@@ -658,7 +743,7 @@ function renderCanvas() {
     ctx.fillStyle = '#F2EDE4'
     ctx.fill()
     ctx.lineWidth = 2.2
-    ctx.strokeStyle = TRACE_COLOR
+    ctx.strokeStyle = palette.line
     ctx.stroke()
   }
 
@@ -770,7 +855,7 @@ const tooltipStyle = computed(() => {
   const h = hoveredInspection.value
   if (!h) return {}
   const tipW = 198
-  const tipH = 82
+  const tipH = hoveredBetweenKeyNote.value ? 113 : 82
   const flipLeft = h.canvasX + tipW + 20 > canvasWidth
   const left = flipLeft
     ? Math.max(AXIS_WIDTH + 8, h.canvasX - tipW - 14)
@@ -862,6 +947,13 @@ onBeforeUnmount(() => {
         <span class="tip-freq">{{ hoveredInspection.pitch.frequency.toFixed(1) }} Hz</span>
         <span class="tip-cents">{{ formatCents(hoveredInspection.pitch.cents) }}</span>
       </div>
+      <div v-if="hoveredBetweenKeyNote" class="tip-off-key">
+        <span class="tip-off-key-tag">琴缝音</span>
+        <span>
+          平均比 {{ midiToNoteParts(hoveredBetweenKeyNote.nearestMidi).displayFullName }}
+          {{ formatOffKey(hoveredBetweenKeyNote.cents) }}
+        </span>
+      </div>
     </div>
 
     <!-- Return to live pill when panned into history -->
@@ -876,7 +968,7 @@ onBeforeUnmount(() => {
 
     <!-- Subtle interaction hint when curve has data -->
     <div v-if="!isEmpty && !hoveredInspection" class="canvas-hint" aria-hidden="true">
-      悬停曲线查看音高 · 拖动回看历史 · 点击左侧音阶试听
+      悬停曲线查看音高 · 拖动回看历史 · 点击左侧音阶试听 · 红色段为琴缝音
     </div>
 
     <!-- Inviting empty state -->
@@ -1018,6 +1110,25 @@ onBeforeUnmount(() => {
 
 .tip-cents {
   color: var(--ink-secondary);
+  font-weight: 600;
+}
+
+.tip-off-key {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin-top: 0.35rem;
+  padding-top: 0.35rem;
+  border-top: 1px solid var(--border-hairline);
+  font-size: 0.76rem;
+  color: var(--pitch-sharp);
+}
+
+.tip-off-key-tag {
+  padding: 0.04rem 0.36rem;
+  border-radius: var(--radius-sm);
+  background-color: var(--pitch-sharp-soft);
+  border: 1px solid color-mix(in oklab, var(--pitch-sharp) 50%, transparent);
   font-weight: 600;
 }
 
