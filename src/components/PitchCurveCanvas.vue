@@ -1165,7 +1165,7 @@ onBeforeUnmount(() => {
 /* Empty State Overlay */
 .empty-overlay {
   position: absolute;
-  inset: 0 0 28px 58px;
+  inset: 0;
   z-index: 6;
   display: flex;
   align-items: center;
@@ -1180,7 +1180,11 @@ onBeforeUnmount(() => {
 }
 
 .empty-card {
-  max-inline-size: 460px;
+  position: fixed;
+  inset-block-start: 50%;
+  inset-inline-start: 50%;
+  translate: -50% -50%;
+  inline-size: min(460px, 100vw - 2.5rem);
   padding: 1.5rem 1.7rem;
   border-radius: var(--radius-lg);
   background-color: color-mix(in oklab, var(--surface-panel) 94%, transparent);
@@ -1244,13 +1248,17 @@ onBeforeUnmount(() => {
   }
 }
 
+/* The page scrolls in the stacked layout, so the card stays inside the chart there */
+@media (max-width: 900px) {
+  .empty-card {
+    position: static;
+    translate: none;
+  }
+}
+
 @media (max-width: 640px) {
   .canvas-hint {
     display: none;
-  }
-
-  .empty-overlay {
-    inset: 0 0 28px 0;
   }
 }
 </style>
