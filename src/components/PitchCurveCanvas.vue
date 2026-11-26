@@ -53,8 +53,10 @@ const TOP_PAD = 16
 const BOTTOM_PAD = 28
 const RIGHT_PAD = 18
 
-// Viewport pitch range in MIDI units (vertical span ~26 semitones = 2 octaves + 2)
-const VISIBLE_SEMITONES = 26
+// Viewport pitch range in MIDI units: 2 octaves + 2 while following the voice,
+// smaller rows showing 3 octaves + 4 when browsing freely
+const FOLLOW_SEMITONES = 26
+const BROWSE_SEMITONES = 40
 const MIN_MIDI_BOUND = 34 // ~A#1
 const MAX_MIDI_BOUND = 90 // ~F#6
 
@@ -77,6 +79,7 @@ let canvasHeight = 420
 let resizeObserver: ResizeObserver | null = null
 let drawRafId: number | null = null
 
+const visibleSemitones = computed(() => (props.autoFollow ? FOLLOW_SEMITONES : BROWSE_SEMITONES))
 const isEmpty = computed(() => props.samples.length === 0 && !props.isListening)
 const isPannedAway = computed(() => timeOffset.value > 0.15)
 
@@ -95,7 +98,7 @@ function getTimeBounds(): { startTime: number; endTime: number } {
 }
 
 function getMidiBounds(): { minMidi: number; maxMidi: number } {
-  const half = VISIBLE_SEMITONES / 2
+  const half = visibleSemitones.value / 2
   return {
     minMidi: centerMidi.value - half,
     maxMidi: centerMidi.value + half,
@@ -145,7 +148,7 @@ const hoveredBetweenKeyNote = computed(() => {
 })
 
 function clampCenterMidi(val: number): number {
-  const half = VISIBLE_SEMITONES / 2
+  const half = visibleSemitones.value / 2
   return Math.max(MIN_MIDI_BOUND + half, Math.min(MAX_MIDI_BOUND - half, val))
 }
 
@@ -179,7 +182,7 @@ watch(
     if (props.autoFollow && props.isListening && props.samples.length > 0) {
       const latest = props.samples[props.samples.length - 1]!
       if (latest.midi !== null) {
-        const margin = VISIBLE_SEMITONES * 0.28
+        const margin = visibleSemitones.value * 0.28
         if (Math.abs(latest.midi - targetCenterMidi.value) > margin) {
           targetCenterMidi.value = clampCenterMidi(latest.midi)
         }
@@ -190,6 +193,15 @@ watch(
       hoveredInspection.value = null
       emit('hover', null)
     }
+    scheduleDraw()
+  },
+)
+
+// The visible span changes with auto-follow: ease the view back inside the pitch bounds
+watch(
+  () => props.autoFollow,
+  () => {
+    targetCenterMidi.value = clampCenterMidi(targetCenterMidi.value)
     scheduleDraw()
   },
 )
@@ -314,7 +326,7 @@ function handlePointerMove(e: PointerEvent) {
   if (isDraggingPitch.value) {
     const dy = y - dragStartY
     const plotH = Math.max(1, canvasHeight - TOP_PAD - BOTTOM_PAD)
-    const deltaSemitones = (dy / plotH) * VISIBLE_SEMITONES
+    const deltaSemitones = (dy / plotH) * visibleSemitones.value
     if (Math.abs(dy) > 4 && props.autoFollow) {
       emit('update:autoFollow', false)
     }
@@ -371,8 +383,13 @@ function handleWheel(e: WheelEvent) {
   if (!canvas) return
   const rect = canvas.getBoundingClientRect()
   const x = e.clientX - rect.left
+  const horizontal = Math.abs(e.deltaX) > Math.abs(e.deltaY)
+  // The wheel pans time while following the voice and scrolls pitch when browsing freely;
+  // Shift switches to the other axis, and the key column always scrolls pitch
+  const scrollPitch =
+    x < AXIS_WIDTH || (props.autoFollow ? e.shiftKey : !e.shiftKey && !horizontal)
 
-  if (e.shiftKey || x < AXIS_WIDTH) {
+  if (scrollPitch) {
     // Vertical pitch range scroll
     e.preventDefault()
     if (props.autoFollow) emit('update:autoFollow', false)
@@ -384,9 +401,9 @@ function handleWheel(e: WheelEvent) {
     return
   }
 
-  if (Math.abs(e.deltaX) > Math.abs(e.deltaY) || props.samples.length > 0) {
+  if (horizontal || props.samples.length > 0) {
     e.preventDefault()
-    const delta = Math.abs(e.deltaX) > Math.abs(e.deltaY) ? e.deltaX : e.deltaY
+    const delta = horizontal ? e.deltaX : e.deltaY
     const secondsDelta = (delta / 360) * props.windowSeconds
     timeOffset.value = clampTimeOffset(timeOffset.value - secondsDelta)
     if (pointerPos.value) {
