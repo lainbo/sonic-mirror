@@ -173,6 +173,9 @@ watch(
   },
 )
 
+// Scroll the live time axis every display frame, not only when a sample lands
+watch(() => props.currentTime, scheduleDraw)
+
 watch(
   () => [props.windowSeconds, props.referenceMidi, props.a4Hz, props.isListening],
   () => {

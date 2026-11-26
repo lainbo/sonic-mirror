@@ -9,8 +9,9 @@ import {
 import { detectPitchYin } from '../audio/yinDetector'
 import { generateDemoVocalPhrase } from '../audio/demoPhrase'
 
-const MAX_SAMPLES = 24000 // ~8 minutes at ~50Hz sampling
-const SAMPLE_INTERVAL_MS = 20 // ~50 points/sec for smooth curve + vibrato fidelity
+const MAX_SAMPLES = 30000 // ~8 minutes at ~60Hz sampling
+// One analysis and one sample per 60Hz frame; 120Hz displays analyze every other frame
+const ANALYSIS_INTERVAL_MS = 15
 
 export function useMicrophonePitch(a4Hz: Ref<number>) {
   const isListening = ref(false)
@@ -35,7 +36,7 @@ export function useMicrophonePitch(a4Hz: Ref<number>) {
 
   let sessionBaseTime = 0
   let segmentStartPerf = 0
-  let lastRecordPerf = 0
+  let lastAnalysisPerf = 0
   let recentMidis: number[] = []
   let smoothedMidi: number | null = null
   let silenceFrames = 0
@@ -95,6 +96,13 @@ export function useMicrophonePitch(a4Hz: Ref<number>) {
 
   function processFrame(now: number) {
     if (!isListening.value || !analyser || !timeDomainBuffer || !audioCtx) return
+    rafId = window.requestAnimationFrame(processFrame)
+
+    const elapsed = sessionBaseTime + (now - segmentStartPerf) / 1000
+    currentTime.value = elapsed
+
+    if (now - lastAnalysisPerf < ANALYSIS_INTERVAL_MS) return
+    lastAnalysisPerf = now
 
     analyser.getFloatTimeDomainData(timeDomainBuffer)
     const detection = detectPitchYin(timeDomainBuffer, audioCtx.sampleRate, {
@@ -108,11 +116,7 @@ export function useMicrophonePitch(a4Hz: Ref<number>) {
     const normalizedRms = Math.min(1, Math.pow(detection.rms * 6.5, 0.72))
     inputLevel.value = inputLevel.value * 0.65 + normalizedRms * 0.35
 
-    const elapsed = sessionBaseTime + (now - segmentStartPerf) / 1000
-    currentTime.value = elapsed
-
-    let acceptedMidi: number | null = null
-    let acceptedFreq: number | null = null
+    let pitch: PitchInfo | null = null
 
     if (detection.frequency !== null && detection.clarity >= 0.76) {
       silenceFrames = 0
@@ -134,13 +138,13 @@ export function useMicrophonePitch(a4Hz: Ref<number>) {
         smoothedMidi = smoothedMidi * 0.32 + filteredMidi * 0.68
       }
 
-      acceptedMidi = smoothedMidi
-      acceptedFreq = detection.frequency
       clarity.value = detection.clarity
 
-      const info = describePitchFromMidi(acceptedMidi, a4Hz.value, acceptedFreq)
-      currentPitch.value = info
-      lastStablePitch.value = info
+      // Frequency follows the smoothed pitch so Hz, cents and the drawn curve agree,
+      // and A4 recalibration (which re-derives midi from frequency) keeps the filtering
+      pitch = describePitchFromMidi(smoothedMidi, a4Hz.value)
+      currentPitch.value = pitch
+      lastStablePitch.value = pitch
     } else {
       silenceFrames++
       clarity.value = 0
@@ -151,23 +155,18 @@ export function useMicrophonePitch(a4Hz: Ref<number>) {
       }
     }
 
-    if (now - lastRecordPerf >= SAMPLE_INTERVAL_MS) {
-      lastRecordPerf = now
-      const list = samples.value
-      list.push({
-        time: elapsed,
-        frequency: acceptedFreq,
-        midi: acceptedMidi,
-        clarity: detection.clarity,
-        rms: detection.rms,
-      })
-      if (list.length > MAX_SAMPLES) {
-        list.splice(0, list.length - MAX_SAMPLES)
-      }
-      sampleVersion.value++
+    const list = samples.value
+    list.push({
+      time: elapsed,
+      frequency: pitch?.frequency ?? null,
+      midi: pitch?.midi ?? null,
+      clarity: detection.clarity,
+      rms: detection.rms,
+    })
+    if (list.length > MAX_SAMPLES) {
+      list.splice(0, list.length - MAX_SAMPLES)
     }
-
-    rafId = window.requestAnimationFrame(processFrame)
+    sampleVersion.value++
   }
 
   async function start(): Promise<boolean> {
@@ -227,7 +226,7 @@ export function useMicrophonePitch(a4Hz: Ref<number>) {
       }
 
       segmentStartPerf = performance.now()
-      lastRecordPerf = 0
+      lastAnalysisPerf = 0
       recentMidis = []
       smoothedMidi = null
       silenceFrames = 0
